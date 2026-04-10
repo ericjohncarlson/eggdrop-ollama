@@ -1,22 +1,22 @@
 #!/usr/bin/env tclsh
 # Eggdrop Ollama Integration Script
-# Responds to !gpt commands by querying Ollama instance via WireGuard
+# Responds to !s commands by querying Ollama instance via WireGuard
 
 # Configuration
-set ollama_host "10.66.66.5"
+set ollama_host "127.0.0.1"
 set ollama_port "11434"
-set ollama_model "llama3.1:8b"  ;# Change this to your preferred model
-set ollama_system_prompt ""  ;# Custom system prompt (empty = use model default)
+set ollama_model "ministral-3:8b-cloud"  ;# Change this to your preferred model
+set ollama_system_prompt "Keep responses concise and under 1000 characters. You are answering questions in an IRC channel where messages are short. Do not use markdown, tables, code blocks, bullet points, or any formatting. Use plain text only."  ;# Custom system prompt (empty = use model default)
 set max_response_length 400  ;# Maximum characters for IRC response
-set timeout 120  ;# Timeout in seconds for HTTP requests
+set timeout 60  ;# Timeout in seconds for HTTP requests
 
 # Rate limiting configuration
-set query_limit 5  ;# Maximum queries per time window
+set query_limit 10  ;# Maximum queries per time window
 set query_window 60  ;# Time window in seconds (60 = 1 minute)
 set query_tracker [dict create]
 
 # Conversation context configuration
-set max_context_messages 5  ;# Number of previous exchanges to remember
+set max_context_messages 10  ;# Number of previous exchanges to remember
 set conversation_history [dict create]
 
 # Load required packages
@@ -28,24 +28,24 @@ package require tls
 ::http::register https 443 [list ::tls::socket -autoservername true]
 
 # Bind the trigger to the procedure
-bind pub - "!gpt" gpt_query
+bind pub - "!s" gpt_query
 
-# Main procedure to handle !gpt commands
+# Main procedure to handle !s commands
 proc gpt_query {nick uhost hand chan text} {
     global ollama_host ollama_port ollama_model ollama_system_prompt max_response_length timeout
     global query_tracker query_limit query_window conversation_history max_context_messages
-    
+
     # Check if user provided a query
     set query [string trim $text]
     if {$query eq ""} {
-        putserv "PRIVMSG $chan :Usage: !gpt <your question>"
+        putserv "PRIVMSG $chan :Usage: !s <your question>"
         return
     }
-    
+
     # Rate limiting check
     set current_time [clock seconds]
     set user_key "${chan}:${nick}"
-    
+
     if {[dict exists $query_tracker $user_key]} {
         set user_queries [dict get $query_tracker $user_key]
         # Filter queries within the time window
@@ -55,23 +55,23 @@ proc gpt_query {nick uhost hand chan text} {
                 lappend recent_queries $query_time
             }
         }
-        
+
         if {[llength $recent_queries] >= $query_limit} {
             putserv "PRIVMSG $chan :\002$nick\002: Rate limit exceeded. Please wait [expr $query_window - ($current_time - [lindex $recent_queries 0])] seconds."
             return
         }
-        
+
         # Update tracker with filtered list plus new query
         lappend recent_queries $current_time
         dict set query_tracker $user_key $recent_queries
     } else {
         dict set query_tracker $user_key [list $current_time]
     }
-    
+
     # Build context-aware prompt
     set context_key $chan
     set full_prompt $query
-    
+
     if {[dict exists $conversation_history $context_key]} {
         set history [dict get $conversation_history $context_key]
         if {[llength $history] > 0} {
@@ -84,10 +84,10 @@ proc gpt_query {nick uhost hand chan text} {
             set full_prompt $context_prompt
         }
     }
-    
+
     # Sanitize the query for JSON
     set full_prompt [string map {"\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"} $full_prompt]
-    
+
     # Prepare JSON payload for Ollama API (with keep-alive to speed up subsequent queries)
     if {$ollama_system_prompt ne ""} {
         # Sanitize system prompt for JSON
@@ -96,19 +96,19 @@ proc gpt_query {nick uhost hand chan text} {
     } else {
         set json_data "{\"model\": \"$ollama_model\", \"prompt\": \"$full_prompt\", \"stream\": false, \"keep_alive\": \"10m\"}"
     }
-    
+
     # Make HTTP request to Ollama
     set url "http://${ollama_host}:${ollama_port}/api/generate"
-    
+
     putlog "Querying Ollama at $url with model $ollama_model (user: $nick, chan: $chan)"
     putlog "JSON payload: $json_data"
-    
+
     # Start a timer for progress updates on long queries
     set progress_timer [after 15000 [list progress_update $chan $nick]]
-    
+
     # Configure HTTP request
     set headers [list "Content-Type" "application/json" "User-Agent" "EggdropBot/1.0"]
-    
+
     # Set up the HTTP request with error handling
     if {[catch {
         set token [::http::geturl $url \
@@ -122,18 +122,18 @@ proc gpt_query {nick uhost hand chan text} {
         putserv "PRIVMSG $chan :\002$nick\002: Error connecting to Ollama service."
         return
     }
-    
+
     # Cancel the progress timer since we have a response
     after cancel $progress_timer
-    
+
     # Check HTTP status
     set status [::http::status $token]
     set ncode [::http::ncode $token]
-    set response_data [::http::data $token]
-    
+    set response_data [encoding convertfrom utf-8 [::http::data $token]]
+
     putlog "HTTP Status: $status, Code: $ncode"
     putlog "Raw response: [string range $response_data 0 200]..."
-    
+
     if {$status ne "ok" || $ncode != 200} {
         putlog "HTTP request failed with status: $status, code: $ncode"
         putlog "Error response: $response_data"
@@ -141,17 +141,17 @@ proc gpt_query {nick uhost hand chan text} {
         ::http::cleanup $token
         return
     }
-    
+
     # Get response data (already retrieved above)
     ::http::cleanup $token
-    
+
     # Parse JSON response
     if {[catch {set response_dict [::json::json2dict $response_data]} error]} {
         putlog "JSON parsing failed: $error"
         putserv "PRIVMSG $chan :\002$nick\002: Invalid response from Ollama service."
         return
     }
-    
+
     # Extract the response text
     if {[dict exists $response_dict "response"]} {
         set ollama_response [dict get $response_dict "response"]
@@ -160,25 +160,41 @@ proc gpt_query {nick uhost hand chan text} {
         putserv "PRIVMSG $chan :\002$nick\002: Unexpected response format from Ollama."
         return
     }
-    
-    # Clean up the response
+
+    # Clean up the response - strip markdown formatting
     set ollama_response [string trim $ollama_response]
-    
+    regsub -all {```[^\n]*\n?} $ollama_response "" ollama_response
+    regsub -all {\*\*([^*]+)\*\*} $ollama_response {\1} ollama_response
+    regsub -all {\*([^*]+)\*} $ollama_response {\1} ollama_response
+    regsub -all {^#{1,6}\s+} $ollama_response "" ollama_response
+    regsub -all {\n#{1,6}\s+} $ollama_response "\n" ollama_response
+    regsub -all {^\s*[-*]\s+} $ollama_response "" ollama_response
+    regsub -all {\n\s*[-*]\s+} $ollama_response "\n" ollama_response
+    regsub -all {\|[^|]*\|} $ollama_response "" ollama_response
+    regsub -all {`([^`]+)`} $ollama_response {\1} ollama_response
+
+    # Replace UTF-8 special characters with ASCII equivalents
+    set ollama_response [string map [list \
+        \u2018 "'" \u2019 "'" \u201C "\"" \u201D "\"" \
+        \u2013 "-" \u2014 "--" \u2026 "..." \u00A0 " " \
+        \u201A "," \u2022 "-" \u2033 "\"" \u2032 "'" \
+    ] $ollama_response]
+
     # Store in conversation history
     if {![dict exists $conversation_history $context_key]} {
         dict set conversation_history $context_key [list]
     }
-    
+
     set history [dict get $conversation_history $context_key]
     lappend history [list $query $ollama_response]
-    
+
     # Keep only the last N exchanges
     if {[llength $history] > $max_context_messages} {
         set history [lrange $history end-[expr $max_context_messages - 1] end]
     }
-    
+
     dict set conversation_history $context_key $history
-    
+
     # Split long responses into multiple messages
     send_response $chan $nick $ollama_response $max_response_length
 }
@@ -193,27 +209,33 @@ proc send_response {chan nick response max_length} {
     # Remove excessive whitespace and newlines
     regsub -all {\s+} $response " " response
     set response [string trim $response]
-    
+
     if {$response eq ""} {
         putserv "PRIVMSG $chan :\002$nick\002: Ollama returned an empty response."
         return
     }
-    
+
     # If response is short enough, send it as one message
     if {[string length $response] <= $max_length} {
         putserv "PRIVMSG $chan :\002$nick\002: $response"
         return
     }
-    
+
     # Split long responses
     set words [split $response " "]
     set current_message ""
     set message_count 1
-    
+
+    set max_messages 3
+
     foreach word $words {
         set potential_message "$current_message $word"
         if {[string length $potential_message] > $max_length} {
             if {$current_message ne ""} {
+                if {$message_count > $max_messages} {
+                    putserv "PRIVMSG $chan :\002$nick\002: (response truncated)"
+                    return
+                }
                 putserv "PRIVMSG $chan :\002$nick\002 ($message_count): [string trim $current_message]"
                 incr message_count
                 set current_message $word
@@ -228,9 +250,9 @@ proc send_response {chan nick response max_length} {
             set current_message $potential_message
         }
     }
-    
+
     # Send any remaining message
-    if {[string trim $current_message] ne ""} {
+    if {[string trim $current_message] ne "" && $message_count <= $max_messages} {
         putserv "PRIVMSG $chan :\002$nick\002 ($message_count): [string trim $current_message]"
     }
 }
@@ -238,9 +260,9 @@ proc send_response {chan nick response max_length} {
 # Optional: Add a command to clear conversation context
 proc gpt_clear {nick uhost hand chan text} {
     global conversation_history
-    
+
     set context_key $chan
-    
+
     if {[dict exists $conversation_history $context_key]} {
         dict unset conversation_history $context_key
         putserv "PRIVMSG $chan :\002$nick\002: Conversation context cleared for this channel."
@@ -251,19 +273,19 @@ proc gpt_clear {nick uhost hand chan text} {
 }
 
 # Optional: Add a command to check Ollama status
-bind pub - "!gpt-status" gpt_status
+bind pub - "!s-status" gpt_status
 
 proc gpt_status {nick uhost hand chan text} {
     global ollama_host ollama_port timeout
-    
+
     set url "http://${ollama_host}:${ollama_port}/api/tags"
-    
+
     if {[catch {
         set token [::http::geturl $url -timeout [expr $timeout * 1000]]
         set status [::http::status $token]
         set ncode [::http::ncode $token]
         ::http::cleanup $token
-        
+
         if {$status eq "ok" && $ncode == 200} {
             putserv "PRIVMSG $chan :\002$nick\002: Ollama service is running on $ollama_host:$ollama_port"
         } else {
@@ -275,38 +297,38 @@ proc gpt_status {nick uhost hand chan text} {
 }
 
 # Optional: Add a command to list available models
-bind pub - "!gpt-models" gpt_models
+bind pub - "!s-models" gpt_models
 
 # Optional: Add a command to change the current model
-bind pub - "!gpt-model" gpt_model
+bind pub - "!s-model" gpt_model
 
 # Optional: Add a command to set/view custom system prompt
-bind pub - "!gpt-system" gpt_system
+bind pub - "!s-system" gpt_system
 
 # Optional: Add a command to clear conversation context
-bind pub - "!gpt-clear" gpt_clear
+bind pub - "!s-clear" gpt_clear
 
 # Optional: Add a command to change the current model
 proc gpt_model {nick uhost hand chan text} {
     global ollama_host ollama_port ollama_model timeout
-    
+
     set new_model [string trim $text]
-    
+
     # If no model specified, show current model
     if {$new_model eq ""} {
         putserv "PRIVMSG $chan :\002$nick\002: Current model is: $ollama_model"
-        putserv "PRIVMSG $chan :\002$nick\002: Usage: !gpt-model <model_name> (use !gpt-models to see available models)"
+        putserv "PRIVMSG $chan :\002$nick\002: Usage: !s-model <model_name> (use !s-models to see available models)"
         return
     }
-    
+
     # First, let's verify the model exists by checking the models list
     set url "http://${ollama_host}:${ollama_port}/api/tags"
-    
+
     if {[catch {
         set token [::http::geturl $url -timeout [expr $timeout * 1000]]
         set status [::http::status $token]
         set ncode [::http::ncode $token]
-        
+
         if {$status eq "ok" && $ncode == 200} {
             set response_data [::http::data $token]
             if {[catch {set response_dict [::json::json2dict $response_data]} error]} {
@@ -327,14 +349,14 @@ proc gpt_model {nick uhost hand chan text} {
                         }
                     }
                 }
-                
+
                 if {$model_found} {
                     set old_model $ollama_model
                     set ollama_model $new_model
                     putserv "PRIVMSG $chan :\002$nick\002: Model changed from '$old_model' to '$ollama_model'"
                     putlog "Model changed by $nick from '$old_model' to '$ollama_model'"
                 } else {
-                    putserv "PRIVMSG $chan :\002$nick\002: Model '$new_model' not found. Use !gpt-models to see available models."
+                    putserv "PRIVMSG $chan :\002$nick\002: Model '$new_model' not found. Use !s-models to see available models."
                 }
             }
         } else {
@@ -349,9 +371,9 @@ proc gpt_model {nick uhost hand chan text} {
 # Optional: Add a command to set/view custom system prompt
 proc gpt_system {nick uhost hand chan text} {
     global ollama_system_prompt
-    
+
     set new_prompt [string trim $text]
-    
+
     # If no prompt specified, show current prompt
     if {$new_prompt eq ""} {
         if {$ollama_system_prompt eq ""} {
@@ -364,10 +386,10 @@ proc gpt_system {nick uhost hand chan text} {
             }
             putserv "PRIVMSG $chan :\002$nick\002: Current system prompt: $display_prompt"
         }
-        putserv "PRIVMSG $chan :\002$nick\002: Usage: !gpt-system <prompt> or !gpt-system clear"
+        putserv "PRIVMSG $chan :\002$nick\002: Usage: !s-system <prompt> or !s-system clear"
         return
     }
-    
+
     # Handle clearing the prompt
     if {[string tolower $new_prompt] eq "clear" || [string tolower $new_prompt] eq "reset"} {
         set ollama_system_prompt ""
@@ -375,7 +397,7 @@ proc gpt_system {nick uhost hand chan text} {
         putlog "System prompt cleared by $nick"
         return
     }
-    
+
     # Set the new system prompt
     set ollama_system_prompt $new_prompt
     set display_prompt $new_prompt
@@ -388,14 +410,14 @@ proc gpt_system {nick uhost hand chan text} {
 
 proc gpt_models {nick uhost hand chan text} {
     global ollama_host ollama_port timeout
-    
+
     set url "http://${ollama_host}:${ollama_port}/api/tags"
-    
+
     if {[catch {
         set token [::http::geturl $url -timeout [expr $timeout * 1000]]
         set status [::http::status $token]
         set ncode [::http::ncode $token]
-        
+
         if {$status eq "ok" && $ncode == 200} {
             set response_data [::http::data $token]
             if {[catch {set response_dict [::json::json2dict $response_data]} error]} {
@@ -427,7 +449,7 @@ proc gpt_models {nick uhost hand chan text} {
     }
 }
 
-putlog "Ollama integration script loaded - listening for !gpt commands"
+putlog "Ollama integration script loaded - listening for !s commands"
 putlog "Ollama host: $ollama_host:$ollama_port, Model: $ollama_model"
 putlog "Rate limiting: $query_limit queries per $query_window seconds"
 putlog "Conversation context: keeping last $max_context_messages exchanges"
