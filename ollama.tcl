@@ -300,13 +300,10 @@ proc gpt_status {nick uhost hand chan text} {
 bind pub - "!s-models" gpt_models
 
 # Optional: Add a command to change the current model
-bind pub - "!s-model" gpt_model
-
-# Optional: Add a command to set/view custom system prompt
-bind pub - "!s-system" gpt_system
+bind pub o "!s-model" gpt_model
 
 # Optional: Add a command to clear conversation context
-bind pub - "!s-clear" gpt_clear
+bind pub o "!s-clear" gpt_clear
 
 # Optional: Add a command to change the current model
 proc gpt_model {nick uhost hand chan text} {
