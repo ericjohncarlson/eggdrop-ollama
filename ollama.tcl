@@ -30,6 +30,49 @@ package require tls
 # Bind the trigger to the procedure
 bind pub - "!s" gpt_query
 
+# Build a string map that fully JSON-escapes a Tcl string: \, ", and every
+# C0 control byte (0x00-0x1F). Conventional short escapes for \b\t\n\f\r,
+# \u00XX for everything else. Pre-built once at script load.
+proc _build_json_escape_map {} {
+    set m [list "\\" "\\\\" "\"" "\\\""]
+    for {set i 0} {$i < 0x20} {incr i} {
+        switch -- $i {
+            8  { lappend m [format %c $i] "\\b" }
+            9  { lappend m [format %c $i] "\\t" }
+            10 { lappend m [format %c $i] "\\n" }
+            12 { lappend m [format %c $i] "\\f" }
+            13 { lappend m [format %c $i] "\\r" }
+            default { lappend m [format %c $i] [format "\\u%04x" $i] }
+        }
+    }
+    return $m
+}
+set ::json_escape_map [_build_json_escape_map]
+
+proc json_escape {text} {
+    return [string map $::json_escape_map $text]
+}
+
+# Strip markdown and normalize unicode punctuation to ASCII for IRC.
+proc clean_ollama_response {text} {
+    set text [string trim $text]
+    regsub -all {```[^\n]*\n?} $text "" text
+    regsub -all {\*\*([^*]+)\*\*} $text {\1} text
+    regsub -all {\*([^*]+)\*} $text {\1} text
+    regsub -all {^#{1,6}\s+} $text "" text
+    regsub -all {\n#{1,6}\s+} $text "\n" text
+    regsub -all {^\s*[-*]\s+} $text "" text
+    regsub -all {\n\s*[-*]\s+} $text "\n" text
+    regsub -all {\|[^|]*\|} $text "" text
+    regsub -all {`([^`]+)`} $text {\1} text
+    set text [string map [list \
+        ‘ "'" ’ "'" “ "\"" ” "\"" \
+        – "-" — "--" … "..."   " " \
+        ‚ "," • "-" ″ "\"" ′ "'" \
+    ] $text]
+    return $text
+}
+
 # Main procedure to handle !s commands
 proc gpt_query {nick uhost hand chan text} {
     global ollama_host ollama_port ollama_model ollama_system_prompt max_response_length timeout
@@ -38,7 +81,18 @@ proc gpt_query {nick uhost hand chan text} {
     # Check if user provided a query
     set query [string trim $text]
     if {$query eq ""} {
-        putserv "PRIVMSG $chan :Usage: !s <your question>"
+        putserv "PRIVMSG $chan :Usage: !s <your question> | !s daily \[YYYY-MM-DD\]"
+        return
+    }
+
+    # Subcommand: !s daily [date] -> generate IRC log briefing (ops only)
+    if {[string tolower [lindex [split $query] 0]] eq "daily"} {
+        if {![matchattr $hand o|o $chan]} {
+            putserv "PRIVMSG $chan :\002$nick\002: !s daily is restricted to channel operators."
+            return
+        }
+        set date_arg [lindex [split $query] 1]
+        gpt_daily $nick $chan $date_arg
         return
     }
 
@@ -86,12 +140,11 @@ proc gpt_query {nick uhost hand chan text} {
     }
 
     # Sanitize the query for JSON
-    set full_prompt [string map {"\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"} $full_prompt]
+    set full_prompt [json_escape $full_prompt]
 
     # Prepare JSON payload for Ollama API (with keep-alive to speed up subsequent queries)
     if {$ollama_system_prompt ne ""} {
-        # Sanitize system prompt for JSON
-        set sys_prompt [string map {"\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"} $ollama_system_prompt]
+        set sys_prompt [json_escape $ollama_system_prompt]
         set json_data "{\"model\": \"$ollama_model\", \"prompt\": \"$full_prompt\", \"system\": \"$sys_prompt\", \"stream\": false, \"keep_alive\": \"10m\"}"
     } else {
         set json_data "{\"model\": \"$ollama_model\", \"prompt\": \"$full_prompt\", \"stream\": false, \"keep_alive\": \"10m\"}"
@@ -106,14 +159,20 @@ proc gpt_query {nick uhost hand chan text} {
     # Start a timer for progress updates on long queries
     set progress_timer [after 15000 [list progress_update $chan $nick]]
 
+    # Convert to UTF-8 bytes so http::geturl writes the body verbatim instead
+    # of re-encoding it via the channel's default (iso-8859-1) rules, which
+    # can mangle non-ASCII content mid-stream.
+    set body [encoding convertto utf-8 $json_data]
+
     # Configure HTTP request
-    set headers [list "Content-Type" "application/json" "User-Agent" "EggdropBot/1.0"]
+    set headers [list "Content-Type" "application/json; charset=utf-8" "User-Agent" "EggdropBot/1.0"]
 
     # Set up the HTTP request with error handling
     if {[catch {
         set token [::http::geturl $url \
             -headers $headers \
-            -query $json_data \
+            -query $body \
+            -type "application/json; charset=utf-8" \
             -timeout [expr $timeout * 1000] \
             -method POST]
     } error]} {
@@ -161,24 +220,7 @@ proc gpt_query {nick uhost hand chan text} {
         return
     }
 
-    # Clean up the response - strip markdown formatting
-    set ollama_response [string trim $ollama_response]
-    regsub -all {```[^\n]*\n?} $ollama_response "" ollama_response
-    regsub -all {\*\*([^*]+)\*\*} $ollama_response {\1} ollama_response
-    regsub -all {\*([^*]+)\*} $ollama_response {\1} ollama_response
-    regsub -all {^#{1,6}\s+} $ollama_response "" ollama_response
-    regsub -all {\n#{1,6}\s+} $ollama_response "\n" ollama_response
-    regsub -all {^\s*[-*]\s+} $ollama_response "" ollama_response
-    regsub -all {\n\s*[-*]\s+} $ollama_response "\n" ollama_response
-    regsub -all {\|[^|]*\|} $ollama_response "" ollama_response
-    regsub -all {`([^`]+)`} $ollama_response {\1} ollama_response
-
-    # Replace UTF-8 special characters with ASCII equivalents
-    set ollama_response [string map [list \
-        \u2018 "'" \u2019 "'" \u201C "\"" \u201D "\"" \
-        \u2013 "-" \u2014 "--" \u2026 "..." \u00A0 " " \
-        \u201A "," \u2022 "-" \u2033 "\"" \u2032 "'" \
-    ] $ollama_response]
+    set ollama_response [clean_ollama_response $ollama_response]
 
     # Store in conversation history
     if {![dict exists $conversation_history $context_key]} {
@@ -197,6 +239,108 @@ proc gpt_query {nick uhost hand chan text} {
 
     # Split long responses into multiple messages
     send_response $chan $nick $ollama_response $max_response_length
+}
+
+# Briefing: summarize a day of IRC channel log from stats/stang.log.YYYYMMDD.
+proc gpt_daily {nick chan date_arg} {
+    global ollama_host ollama_port ollama_model max_response_length timeout
+
+    # Resolve target date to YYYYMMDD. No arg => yesterday.
+    if {$date_arg eq ""} {
+        set target_date [clock format [clock add [clock seconds] -1 day] -format %Y%m%d]
+    } else {
+        if {![regexp {^(\d{4})-?(\d{2})-?(\d{2})$} $date_arg -> y m d]} {
+            putserv "PRIVMSG $chan :\002$nick\002: Bad date. Use !s daily \[YYYY-MM-DD or YYYYMMDD\]."
+            return
+        }
+        set target_date "${y}${m}${d}"
+    }
+
+    set log_path "stats/stang.log.${target_date}"
+    if {![file exists $log_path]} {
+        putserv "PRIVMSG $chan :\002$nick\002: No log found at $log_path"
+        return
+    }
+
+    if {[catch {
+        set fh [open $log_path r]
+        fconfigure $fh -encoding utf-8
+        set log_content [read $fh]
+        close $fh
+    } err]} {
+        putserv "PRIVMSG $chan :\002$nick\002: Could not read log: $err"
+        return
+    }
+
+    if {[string trim $log_content] eq ""} {
+        putserv "PRIVMSG $chan :\002$nick\002: Log file for $target_date is empty."
+        return
+    }
+
+    # Cap log payload to keep the prompt within typical model context.
+    set max_log_bytes 80000
+    if {[string length $log_content] > $max_log_bytes} {
+        set log_content "[string range $log_content 0 [expr $max_log_bytes - 1]]\n...(log truncated)"
+    }
+
+    putserv "PRIVMSG $chan :\002$nick\002: Generating briefing for $target_date..."
+    putlog "Daily briefing requested by $nick for $chan (date $target_date, [string length $log_content] bytes)"
+
+    set briefing_system "You are an IRC channel briefing writer. The user will give you a full day of IRC channel log. Produce a short summary in plain text only: no markdown, no bullets, no code fences, no tables, no headings. 3 to 5 sentences total. Tone: dry, deadpan, understated. No exclamation marks, no cheerleading, no forced jokes. Stay accurate and grounded in what actually happened. Ignore join/part/quit/nick-change lines entirely; only summarize actual conversation. Cover the main topics discussed, anyone notably active, and anything memorable. Keep total length under 1200 characters."
+    set briefing_user "IRC log for $target_date:\n\n$log_content"
+
+    set sys_esc [json_escape $briefing_system]
+    set usr_esc [json_escape $briefing_user]
+    set json_data "{\"model\": \"$ollama_model\", \"prompt\": \"$usr_esc\", \"system\": \"$sys_esc\", \"stream\": false, \"keep_alive\": \"10m\"}"
+
+    # Convert to UTF-8 bytes explicitly so ::http::geturl writes the body
+    # to the socket verbatim instead of re-encoding it via the channel's
+    # default (iso-8859-1) encoding, which mangled control bytes mid-stream.
+    set body [encoding convertto utf-8 $json_data]
+
+    set url "http://${ollama_host}:${ollama_port}/api/generate"
+    set headers [list "Content-Type" "application/json; charset=utf-8" "User-Agent" "EggdropBot/1.0"]
+    set progress_timer [after 15000 [list progress_update $chan $nick]]
+
+    if {[catch {
+        set token [::http::geturl $url \
+            -headers $headers \
+            -query $body \
+            -type "application/json; charset=utf-8" \
+            -timeout [expr $timeout * 1000] \
+            -method POST]
+    } error]} {
+        after cancel $progress_timer
+        putlog "Daily briefing HTTP failed: $error"
+        putserv "PRIVMSG $chan :\002$nick\002: Error connecting to Ollama service."
+        return
+    }
+    after cancel $progress_timer
+
+    set status [::http::status $token]
+    set ncode [::http::ncode $token]
+    set response_data [encoding convertfrom utf-8 [::http::data $token]]
+    ::http::cleanup $token
+
+    if {$status ne "ok" || $ncode != 200} {
+        putlog "Daily briefing HTTP error: status=$status code=$ncode body=[string range $response_data 0 200]"
+        putserv "PRIVMSG $chan :\002$nick\002: Ollama service returned an error (HTTP $ncode)."
+        return
+    }
+
+    if {[catch {set response_dict [::json::json2dict $response_data]} err]} {
+        putlog "Daily briefing JSON parse failed: $err"
+        putserv "PRIVMSG $chan :\002$nick\002: Invalid response from Ollama service."
+        return
+    }
+    if {![dict exists $response_dict "response"]} {
+        putlog "Daily briefing: no 'response' field. Body: [string range $response_data 0 200]"
+        putserv "PRIVMSG $chan :\002$nick\002: Unexpected response format from Ollama."
+        return
+    }
+
+    set briefing [clean_ollama_response [dict get $response_dict "response"]]
+    send_response $chan $nick "Briefing $target_date: $briefing" $max_response_length
 }
 
 # Helper procedure for progress updates on long queries
