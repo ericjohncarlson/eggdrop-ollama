@@ -286,7 +286,7 @@ proc gpt_daily {nick chan date_arg} {
     putserv "PRIVMSG $chan :\002$nick\002: Generating briefing for $target_date..."
     putlog "Daily briefing requested by $nick for $chan (date $target_date, [string length $log_content] bytes)"
 
-    set briefing_system "You are an IRC channel briefing writer. The user will give you a full day of IRC channel log. Produce a short summary in plain text only: no markdown, no bullets, no code fences, no tables, no headings. 3 to 5 sentences total. Tone: dry, deadpan, understated. No exclamation marks, no cheerleading, no forced jokes. Stay accurate and grounded in what actually happened. Ignore join/part/quit/nick-change lines entirely; only summarize actual conversation. Cover the main topics discussed, anyone notably active, and anything memorable. Keep total length under 1200 characters."
+    set briefing_system "You are an IRC channel briefing writer. The user will give you a full day of IRC channel log. Produce a short summary in plain text only: no markdown, no bullets, no code fences, no tables, no headings. 3 to 5 sentences total. Tone: dry and lightly sarcastic, with a wry, knowing edge. Mild snark is welcome when the log invites it, but stay subtle: no exclamation marks, no cheerleading, no try-hard punchlines. Stay accurate and grounded in what actually happened. Ignore join/part/quit/nick-change lines entirely; only summarize actual conversation. Cover the main topics discussed, anyone notably active, and anything memorable. Keep total length under 1200 characters."
     set briefing_user "IRC log for $target_date:\n\n$log_content"
 
     set sys_esc [json_escape $briefing_system]

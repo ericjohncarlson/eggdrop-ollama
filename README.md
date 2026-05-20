@@ -1,5 +1,60 @@
 # Eggdrop Ollama Integration Script
 
+> **Fork notes (this repository's changes)**
+>
+> The README below is preserved from upstream for reference. This fork has diverged in several ways — when the two disagree, this section wins.
+>
+> **Command rename: `!gpt` → `!s`**
+> Every public command has been renamed for shorter typing in-channel:
+>
+> | Upstream     | This fork     |
+> |--------------|---------------|
+> | `!gpt`       | `!s`          |
+> | `!gpt-status`| `!s-status`   |
+> | `!gpt-models`| `!s-models`   |
+> | `!gpt-model` | `!s-model`    |
+> | `!gpt-clear` | `!s-clear`    |
+> | `!gpt-system`| *(removed)*   |
+>
+> **New: `!s daily [date]` — channel log briefing (ops only)**
+> Generates a short summary of a day's IRC activity by feeding `stats/stang.log.YYYYMMDD` (the eggdrop stats log) to the model.
+> - `!s daily` — yesterday's log
+> - `!s daily 2026-05-19` or `!s daily 20260519` — a specific date
+> - Briefing system prompt is separate from the normal `!s` prompt: plain text, 3–5 sentences, dry and lightly sarcastic in tone, ignores join/part/quit noise.
+> - Log payload is capped at ~80KB to fit typical model context windows.
+>
+> **Op-only commands**
+> The upstream "Advanced Customization" recipe for restricting admin commands is now baked in:
+> - `!s-model` — ops only (`bind pub o`)
+> - `!s-clear` — ops only (`bind pub o`)
+> - `!s daily` — ops only (checked inside `gpt_query`)
+> - `!s-system` — **removed entirely**; the system prompt is set only via the script variable, not from IRC.
+>
+> **Default config changes**
+> The script now defaults to a local/cloud-friendly setup rather than a remote WireGuard host:
+>
+> ```tcl
+> set ollama_host "127.0.0.1"               ;# was 10.66.66.5 (WireGuard)
+> set ollama_port "11434"
+> set ollama_model "ministral-3:8b-cloud"   ;# Ollama cloud model
+> set ollama_system_prompt "Keep responses concise and under 1000 characters. You are answering questions in an IRC channel where messages are short. Do not use markdown, tables, code blocks, bullet points, or any formatting. Use plain text only."
+> set max_response_length 400
+> set timeout 60                            ;# was 120
+> set query_limit 10                        ;# was 5
+> set query_window 60
+> set max_context_messages 10               ;# was 5
+> ```
+>
+> A non-empty `ollama_system_prompt` ships by default to force plain-text, IRC-friendly responses — no markdown, no bullets, no code fences.
+>
+> **HTTP body encoding fix**
+> Both `!s` and `!s daily` now explicitly UTF-8-encode the request body before handing it to `::http::geturl` (via `encoding convertto utf-8`), and set `Content-Type: application/json; charset=utf-8`. Without this, Tcl's default `iso-8859-1` channel encoding mangled non-ASCII bytes mid-stream and broke responses.
+>
+> **Log file location for `!s daily`**
+> The briefing reads from `stats/stang.log.YYYYMMDD` (relative to the eggdrop working directory). If your stats log lives elsewhere or uses a different filename pattern, edit `log_path` in `gpt_daily`.
+>
+> ---
+
 ## Overview
 
 This TCL script integrates Ollama AI models with an Eggdrop IRC bot, allowing users to interact with large language models directly from IRC channels. The bot connects to an Ollama instance over WireGuard and provides a simple command interface for querying AI models.
