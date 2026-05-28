@@ -23,6 +23,13 @@
 > - Briefing system prompt is separate from the normal `!s` prompt: plain text, 3–5 sentences, dry and lightly sarcastic in tone, ignores join/part/quit noise.
 > - Log payload is capped at ~80KB to fit typical model context windows.
 >
+> **New: `bind time` auto-daily at 10:00 ET**
+> A `bind time` fires `auto_daily` every day at 10:00 ET (bot local time), which calls `gpt_daily` directly and posts the briefing to the configured channel. No IRC user needed — the bot sends it under its own nick. Configure the target channel and verify the server timezone:
+> ```tcl
+> set auto_daily_channel "#channel"  ;# Target channel
+> ```
+> The `bind time` spec uses the bot's system local time. If the server isn't in US/Eastern, set `TZ=America/New_York` in eggdrop.conf or the process environment.
+>
 > **Op-only commands**
 > The upstream "Advanced Customization" recipe for restricting admin commands is now baked in:
 > - `!s-model` — ops only (`bind pub o`)
@@ -43,6 +50,7 @@
 > set query_limit 10                        ;# was 5
 > set query_window 60
 > set max_context_messages 10               ;# was 5
+> > set auto_daily_channel "#stang"           ;# new
 > ```
 >
 > A non-empty `ollama_system_prompt` ships by default to force plain-text, IRC-friendly responses — no markdown, no bullets, no code fences.

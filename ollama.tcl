@@ -9,6 +9,7 @@ set ollama_model "ministral-3:8b-cloud"  ;# Change this to your preferred model
 set ollama_system_prompt "Keep responses concise and under 1000 characters. You are answering questions in an IRC channel where messages are short. Do not use markdown, tables, code blocks, bullet points, or any formatting. Use plain text only."  ;# Custom system prompt (empty = use model default)
 set max_response_length 400  ;# Maximum characters for IRC response
 set timeout 60  ;# Timeout in seconds for HTTP requests
+set auto_daily_channel "#stang"  ;# Channel for auto-scheduled daily briefing
 
 # Rate limiting configuration
 set query_limit 10  ;# Maximum queries per time window
@@ -29,6 +30,9 @@ package require tls
 
 # Bind the trigger to the procedure
 bind pub - "!s" gpt_query
+
+# Auto-schedule daily briefing at 10:00 ET (system time must be ET, or set TZ=America/New_York)
+bind time - "00 10 * * *" auto_daily
 
 # Build a string map that fully JSON-escapes a Tcl string: \, ", and every
 # C0 control byte (0x00-0x1F). Conventional short escapes for \b\t\n\f\r,
@@ -239,6 +243,13 @@ proc gpt_query {nick uhost hand chan text} {
 
     # Split long responses into multiple messages
     send_response $chan $nick $ollama_response $max_response_length
+}
+
+# Called by bind time at 10:00 ET — generates and posts daily briefing to the configured channel.
+proc auto_daily {min hour day month year} {
+    global auto_daily_channel
+    putserv "PRIVMSG $auto_daily_channel :Time for yesterday's daily briefing!"
+    gpt_daily $::botnick $auto_daily_channel ""
 }
 
 # Briefing: summarize a day of IRC channel log from stats/stang.log.YYYYMMDD.
